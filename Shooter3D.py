@@ -12,19 +12,35 @@ import math
 import random
 import os
 
+print("Initializing game...")
+
+# Initialize pygame first before doing anything else
+pygame.init()
+print("Pygame initialized")
+
+# Set up display early
+SCREEN_WIDTH = 1200
+SCREEN_HEIGHT = 900
+print(f"Setting up display: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+
 # Try to import OpenGL
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
     has_opengl = True
+    print("OpenGL support enabled")
 except ImportError:
     print("WARNING: PyOpenGL not found. Running in compatibility mode.")
     has_opengl = False
 
-# Constants and settings
-SCREEN_WIDTH = 1200
-SCREEN_HEIGHT = 900
-FOV = 60  # Field of view in degrees
+# Set up screen (needs to be done before any texture loading)
+if has_opengl:
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DOUBLEBUF | OPENGL)
+else:
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+
+pygame.display.set_caption("3D FPS Shooter")
+print("Display initialized")
 
 # Colors
 WHITE = (255, 255, 255)
@@ -44,33 +60,44 @@ WORLD_SIZE = 50.0
 FLOOR_Y = -1.0
 CEILING_Y = 5.0
 WALL_HEIGHT = CEILING_Y - FLOOR_Y
+FOV = 60  # Field of view in degrees
 
 # Textures and resources
 SPRITES_DIR = os.path.join(os.path.dirname(__file__), 'sprites')
+
 def load_image(filename, size=None):
     try:
         path = os.path.join(SPRITES_DIR, filename)
-        image = pygame.image.load(path).convert_alpha()
+        print(f"Loading image: {path}")
+        image = pygame.image.load(path)
+        image = image.convert_alpha() if image.get_flags() & pygame.SRCALPHA else image.convert()
         if size:
             image = pygame.transform.scale(image, size)
+        print(f"Image loaded successfully: {filename}")
         return image
     except Exception as e:
         print(f"Error loading image {filename}: {e}")
         return None
 
-# Load textures
-wall_texture = load_image('vaeg.jpg', (256, 256))
-floor_texture = None  # We'll use a color instead
-ceiling_texture = None  # We'll use a color instead
-weapon_texture = load_image('skud.png', (128, 128))
-enemy_texture = load_image('fjende.png', (128, 128))
-player_texture = load_image('Spiller.png', (128, 128))
+# Texture placeholders (will be loaded per-instance in Shooter3D.load_textures)
+wall_texture = None
+weapon_texture = None
+enemy_texture = None
+player_texture = None
+# GL texture IDs
+wall_tex_id = None
+weapon_tex_id = None
+enemy_tex_id = None
+player_tex_id = None
+print("Textures will be loaded after display init")
+print("Textures loaded")
 
 # Sound effects
 def load_sound(path):
     try:
         return pygame.mixer.Sound(path)
-    except:
+    except Exception as e:
+        print(f"Error loading sound {path}: {e}")
         return None
 
 shoot_sound = load_sound('shoot.wav')
@@ -183,27 +210,27 @@ class Wall:
         self.texture = texture or wall_texture
         # Calculate wall normal (perpendicular to wall)
         wall_vector = Vector3(end_pos.x - start_pos.x, 0, end_pos.z - start_pos.z)
+        # select GL texture id based on global mapping
+        global wall_tex_id
+        self.tex_id = wall_tex_id if self.texture is wall_texture else None
         self.normal = Vector3(-wall_vector.z, 0, wall_vector.x).normalize()
 
     def draw(self):
         if not has_opengl:
             return
-
+        gl.glPushMatrix()
         glPushMatrix()
-
-        # Apply texture if available
-        if self.texture:
-            # Convert Pygame texture to OpenGL texture
-            texture_data = pygame.image.tostring(self.texture, "RGBA", True)
-            texture_id = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, texture_id)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.texture.get_width(),
-                        self.texture.get_height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+        # Bind pre-created GL texture if available
+        if getattr(self, 'tex_id', None):
+            try:
+                gl.glEnable(gl.GL_TEXTURE_2D)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex_id)
+            except Exception:
+                gl.glDisable(gl.GL_TEXTURE_2D)
+                gl.glColor3f(0.7, 0.7, 0.7)
             glEnable(GL_TEXTURE_2D)
-        else:
-            glDisable(GL_TEXTURE_2D)
+            gl.glDisable(gl.GL_TEXTURE_2D)
+            gl.glColor3f(0.7, 0.7, 0.7)  # Gray color if no texture
             glColor3f(0.7, 0.7, 0.7)  # Gray color if no texture
 
         # Draw wall as a quad
@@ -229,11 +256,12 @@ class Wall:
         glVertex3f(self.start.x, CEILING_Y, self.start.z)
 
         glEnd()
-
-        if self.texture:
-            glDisable(GL_TEXTURE_2D)
+        # Unbind texture
+        if getattr(self, 'tex_id', None):
+            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+            gl.glDisable(gl.GL_TEXTURE_2D)
             glDeleteTextures(1, [texture_id])
-
+        gl.glPopMatrix()
         glPopMatrix()
 
     def collides_with_point(self, point, radius=0.5):
@@ -365,33 +393,29 @@ class Enemy:
     def draw(self):
         if not has_opengl:
             return
-
+        gl.glPushMatrix()
         glPushMatrix()
-
-        # Enable billboard mode (sprite always faces camera)
-        glDisable(GL_LIGHTING)
-        glEnable(GL_BLEND)
+        gl.glDisable(GL_LIGHTING)
+        gl.glEnable(GL_BLEND)
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        # Get current modelview matrix
+        modelview = gl.glGetDoublev(gl.GL_MODELVIEW_MATRIX)
         modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-
         # Extract camera right and up vectors for billboarding
         camera_right = Vector3(modelview[0][0], modelview[0][1], modelview[0][2])
         camera_up = Vector3(modelview[1][0], modelview[1][1], modelview[1][2])
-
-        # Apply texture
-        if self.texture:
-            texture_data = pygame.image.tostring(self.texture, "RGBA", True)
-            texture_id = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, texture_id)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.texture.get_width(),
-                        self.texture.get_height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+        # Use pre-created enemy texture id
+        tex_id = enemy_tex_id if 'enemy_tex_id' in globals() else None
+        if tex_id:
+            try:
+                gl.glEnable(gl.GL_TEXTURE_2D)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
+            except Exception:
+                gl.glDisable(gl.GL_TEXTURE_2D)
+                gl.glColor3f(1.0, 0.0, 0.0)
             glEnable(GL_TEXTURE_2D)
-        else:
-            glDisable(GL_TEXTURE_2D)
+            gl.glDisable(gl.GL_TEXTURE_2D)
+            gl.glColor3f(1.0, 0.0, 0.0)
             glColor3f(1.0, 0.0, 0.0)  # Red color for enemy
 
         # Calculate billboard vertices
@@ -429,9 +453,9 @@ class Enemy:
         glTexCoord2f(1, 1); glVertex3f(p3.x, p3.y, p3.z)
         glTexCoord2f(0, 1); glVertex3f(p4.x, p4.y, p4.z)
         glEnd()
-
-        if self.texture:
-            glDisable(GL_TEXTURE_2D)
+        if tex_id:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+            gl.glDisable(gl.GL_TEXTURE_2D)
             glDeleteTextures(1, [texture_id])
 
         glDisable(GL_BLEND)
@@ -618,10 +642,35 @@ class Shooter3D:
         # Load game textures after display is initialized
         global wall_texture, weapon_texture, enemy_texture, player_texture
         wall_texture = load_image('vaeg.jpg', (256, 256))
+        global wall_tex_id, weapon_tex_id, enemy_tex_id, player_tex_id
         weapon_texture = load_image('skud.png', (128, 128))
         enemy_texture = load_image('fjende.png', (128, 128))
         player_texture = load_image('Spiller.png', (128, 128))
     def setup_opengl(self):
+        # Create GL textures once
+        if has_opengl:
+            def make_gl_tex(surface):
+                if surface is None:
+                    return None
+                try:
+                    data = pygame.image.tostring(surface, "RGBA", True)
+                    tid = gl.glGenTextures(1)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, tid)
+                    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+                    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, surface.get_width(), surface.get_height(), 0,
+                                    gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                    return tid
+                except Exception as e:
+                    print(f"Failed to create GL texture: {e}")
+                    return None
+
+            wall_tex_id = make_gl_tex(wall_texture)
+            weapon_tex_id = make_gl_tex(weapon_texture)
+            enemy_tex_id = make_gl_tex(enemy_texture)
+            player_tex_id = make_gl_tex(player_texture)
+
         # Set up the projection matrix
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
