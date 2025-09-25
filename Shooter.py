@@ -203,12 +203,40 @@ class Player:
             self.angle -= self.turn_speed
         if keys[pygame.K_RIGHT]:
             self.angle += self.turn_speed
+
+        # Beregn bevægelse
+        move_x = 0
+        move_y = 0
         if keys[pygame.K_UP]:
-            self.x += self.speed * math.cos(math.radians(self.angle))
-            self.y += self.speed * math.sin(math.radians(self.angle))
+            move_x = self.speed * math.cos(math.radians(self.angle))
+            move_y = self.speed * math.sin(math.radians(self.angle))
         if keys[pygame.K_DOWN]:
-            self.x -= self.speed * math.cos(math.radians(self.angle))
-            self.y -= self.speed * math.sin(math.radians(self.angle))
+            move_x = -self.speed * math.cos(math.radians(self.angle))
+            move_y = -self.speed * math.sin(math.radians(self.angle))
+
+        # Anvend bevægelse i X-retningen først and tjek for kollision
+        self.x += move_x
+        self.x = max(self.radius, min(SCREEN_WIDTH - self.radius, self.x))
+        x_collision = False
+        for obs in self.obstacles:
+            if obs.collides(self.x, old_y, self.radius):
+                x_collision = True
+                self.x = old_x  # Gå tilbage til original X position
+                break
+
+        # Anvend bevægelse i Y-retningen and tjek for kollision
+        self.y += move_y
+        self.y = max(self.radius, min(SCREEN_HEIGHT - self.radius, self.y))
+        y_collision = False
+        for obs in self.obstacles:
+            if obs.collides(self.x, self.y, self.radius):
+                y_collision = True
+                self.y = old_y  # Gå tilbage til original Y position
+                break
+
+        # Hvis både X og Y har kollision, så er vi måske fanget i et hjørne - gå helt tilbage
+        if x_collision and y_collision:
+            self.x, self.y = old_x, old_y
 
         # Weapon switching
         if keys[pygame.K_1] and "pistol" in self.weapons_owned:
