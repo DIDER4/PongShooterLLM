@@ -23,14 +23,16 @@ SCREEN_WIDTH = 1200
 SCREEN_HEIGHT = 900
 print(f"Setting up display: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
 
-# Try to import OpenGL
+# Try to import OpenGL (use module aliases to avoid wildcard unresolved references)
 try:
-    from OpenGL.GL import *
-    from OpenGL.GLU import *
+    import OpenGL.GL as gl
+    import OpenGL.GLU as glu
     has_opengl = True
     print("OpenGL support enabled")
-except ImportError:
-    print("WARNING: PyOpenGL not found. Running in compatibility mode.")
+except Exception:
+    print("WARNING: PyOpenGL not available. Running in compatibility mode.")
+    gl = None
+    glu = None
     has_opengl = False
 
 # Set up screen (needs to be done before any texture loading)
@@ -38,7 +40,7 @@ if has_opengl:
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DOUBLEBUF | OPENGL)
 else:
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-
+    
 pygame.display.set_caption("3D FPS Shooter")
 print("Display initialized")
 
@@ -79,17 +81,12 @@ def load_image(filename, size=None):
         print(f"Error loading image {filename}: {e}")
         return None
 
-# Texture placeholders (will be loaded per-instance in Shooter3D.load_textures)
-wall_texture = None
-weapon_texture = None
-enemy_texture = None
-player_texture = None
-# GL texture IDs
-wall_tex_id = None
-weapon_tex_id = None
-enemy_tex_id = None
-player_tex_id = None
-print("Textures will be loaded after display init")
+print("Loading textures...")
+# Load textures (display is initialized so convert_alpha works)
+wall_texture = load_image('vaeg.jpg', (256, 256))
+weapon_texture = load_image('skud.png', (128, 128))
+enemy_texture = load_image('fjende.png', (128, 128))
+player_texture = load_image('Spiller.png', (128, 128))
 print("Textures loaded")
 
 # Sound effects
@@ -210,59 +207,66 @@ class Wall:
         self.texture = texture or wall_texture
         # Calculate wall normal (perpendicular to wall)
         wall_vector = Vector3(end_pos.x - start_pos.x, 0, end_pos.z - start_pos.z)
-        # select GL texture id based on global mapping
-        global wall_tex_id
-        self.tex_id = wall_tex_id if self.texture is wall_texture else None
         self.normal = Vector3(-wall_vector.z, 0, wall_vector.x).normalize()
 
     def draw(self):
         if not has_opengl:
             return
+
         gl.glPushMatrix()
-        glPushMatrix()
-        # Bind pre-created GL texture if available
-        if getattr(self, 'tex_id', None):
+
+        texture_id = None
+        # Apply texture if available
+        if self.texture is not None:
             try:
+                texture_data = pygame.image.tostring(self.texture, "RGBA", True)
+                texture_id = gl.glGenTextures(1)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, self.texture.get_width(),
+                            self.texture.get_height(), 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, texture_data)
                 gl.glEnable(gl.GL_TEXTURE_2D)
-                gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex_id)
-            except Exception:
+            except Exception as e:
+                texture_id = None
                 gl.glDisable(gl.GL_TEXTURE_2D)
                 gl.glColor3f(0.7, 0.7, 0.7)
-            glEnable(GL_TEXTURE_2D)
+        else:
             gl.glDisable(gl.GL_TEXTURE_2D)
             gl.glColor3f(0.7, 0.7, 0.7)  # Gray color if no texture
-            glColor3f(0.7, 0.7, 0.7)  # Gray color if no texture
 
         # Draw wall as a quad
-        glBegin(GL_QUADS)
+        gl.glBegin(gl.GL_QUADS)
 
         # Calculate wall length for proper texture mapping
         wall_length = math.sqrt((self.end.x - self.start.x)**2 + (self.end.z - self.start.z)**2)
 
         # Bottom left
-        glTexCoord2f(0, 0)
-        glVertex3f(self.start.x, FLOOR_Y, self.start.z)
+        gl.glTexCoord2f(0, 0)
+        gl.glVertex3f(self.start.x, FLOOR_Y, self.start.z)
 
         # Bottom right
-        glTexCoord2f(wall_length/2, 0)
-        glVertex3f(self.end.x, FLOOR_Y, self.end.z)
+        gl.glTexCoord2f(wall_length/2, 0)
+        gl.glVertex3f(self.end.x, FLOOR_Y, self.end.z)
 
         # Top right
-        glTexCoord2f(wall_length/2, 1)
-        glVertex3f(self.end.x, CEILING_Y, self.end.z)
+        gl.glTexCoord2f(wall_length/2, 1)
+        gl.glVertex3f(self.end.x, CEILING_Y, self.end.z)
 
         # Top left
-        glTexCoord2f(0, 1)
-        glVertex3f(self.start.x, CEILING_Y, self.start.z)
+        gl.glTexCoord2f(0, 1)
+        gl.glVertex3f(self.start.x, CEILING_Y, self.start.z)
 
-        glEnd()
-        # Unbind texture
-        if getattr(self, 'tex_id', None):
-            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        gl.glEnd()
+
+        if texture_id is not None:
             gl.glDisable(gl.GL_TEXTURE_2D)
-            glDeleteTextures(1, [texture_id])
+            try:
+                gl.glDeleteTextures([texture_id])
+            except Exception:
+                pass
+
         gl.glPopMatrix()
-        glPopMatrix()
 
     def collides_with_point(self, point, radius=0.5):
         """Check if a point (with radius) collides with this wall"""
@@ -393,32 +397,37 @@ class Enemy:
     def draw(self):
         if not has_opengl:
             return
+
         gl.glPushMatrix()
-        glPushMatrix()
-        gl.glDisable(GL_LIGHTING)
-        gl.glEnable(GL_BLEND)
-        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        gl.glDisable(gl.GL_LIGHTING)
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+
         modelview = gl.glGetDoublev(gl.GL_MODELVIEW_MATRIX)
-        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-        # Extract camera right and up vectors for billboarding
+
         camera_right = Vector3(modelview[0][0], modelview[0][1], modelview[0][2])
         camera_up = Vector3(modelview[1][0], modelview[1][1], modelview[1][2])
-        # Use pre-created enemy texture id
-        tex_id = enemy_tex_id if 'enemy_tex_id' in globals() else None
-        if tex_id:
+
+        texture_id = None
+        if self.texture is not None:
             try:
+                texture_data = pygame.image.tostring(self.texture, "RGBA", True)
+                texture_id = gl.glGenTextures(1)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, self.texture.get_width(),
+                                self.texture.get_height(), 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, texture_data)
                 gl.glEnable(gl.GL_TEXTURE_2D)
-                gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
             except Exception:
+                texture_id = None
                 gl.glDisable(gl.GL_TEXTURE_2D)
                 gl.glColor3f(1.0, 0.0, 0.0)
-            glEnable(GL_TEXTURE_2D)
+        else:
             gl.glDisable(gl.GL_TEXTURE_2D)
             gl.glColor3f(1.0, 0.0, 0.0)
-            glColor3f(1.0, 0.0, 0.0)  # Red color for enemy
 
-        # Calculate billboard vertices
         half_width = self.radius
         half_height = self.height / 2
 
@@ -446,22 +455,24 @@ class Enemy:
             self.position.z - camera_right.z * half_width - camera_up.z * half_height
         )
 
-        # Draw billboard as a quad
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex3f(p1.x, p1.y, p1.z)
-        glTexCoord2f(1, 0); glVertex3f(p2.x, p2.y, p2.z)
-        glTexCoord2f(1, 1); glVertex3f(p3.x, p3.y, p3.z)
-        glTexCoord2f(0, 1); glVertex3f(p4.x, p4.y, p4.z)
-        glEnd()
-        if tex_id:
-            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        gl.glBegin(gl.GL_QUADS)
+        gl.glTexCoord2f(0, 0); gl.glVertex3f(p1.x, p1.y, p1.z)
+        gl.glTexCoord2f(1, 0); gl.glVertex3f(p2.x, p2.y, p2.z)
+        gl.glTexCoord2f(1, 1); gl.glVertex3f(p3.x, p3.y, p3.z)
+        gl.glTexCoord2f(0, 1); gl.glVertex3f(p4.x, p4.y, p4.z)
+        gl.glEnd()
+
+        if texture_id is not None:
             gl.glDisable(gl.GL_TEXTURE_2D)
-            glDeleteTextures(1, [texture_id])
+            try:
+                gl.glDeleteTextures([texture_id])
+            except Exception:
+                pass
 
-        glDisable(GL_BLEND)
-        glEnable(GL_LIGHTING)
+        gl.glDisable(gl.GL_BLEND)
+        gl.glEnable(gl.GL_LIGHTING)
 
-        glPopMatrix()
+        gl.glPopMatrix()
 
     def hit(self):
         self.health -= 1
@@ -511,16 +522,13 @@ class Bullet:
         if not has_opengl:
             return
 
-        glPushMatrix()
-
-        # Draw bullet as a small sphere
-        glTranslatef(self.position.x, self.position.y, self.position.z)
-        glColor3f(1.0, 1.0, 0.0)  # Yellow color for bullet
-        sphere = gluNewQuadric()
-        gluSphere(sphere, self.radius, 8, 8)
-        gluDeleteQuadric(sphere)
-
-        glPopMatrix()
+        gl.glPushMatrix()
+        gl.glTranslatef(self.position.x, self.position.y, self.position.z)
+        gl.glColor3f(1.0, 1.0, 0.0)
+        sphere = glu.gluNewQuadric()
+        glu.gluSphere(sphere, self.radius, 8, 8)
+        glu.gluDeleteQuadric(sphere)
+        gl.glPopMatrix()
 
 class WeaponViewModel:
     """First-person weapon view"""
@@ -642,57 +650,32 @@ class Shooter3D:
         # Load game textures after display is initialized
         global wall_texture, weapon_texture, enemy_texture, player_texture
         wall_texture = load_image('vaeg.jpg', (256, 256))
-        global wall_tex_id, weapon_tex_id, enemy_tex_id, player_tex_id
         weapon_texture = load_image('skud.png', (128, 128))
         enemy_texture = load_image('fjende.png', (128, 128))
         player_texture = load_image('Spiller.png', (128, 128))
     def setup_opengl(self):
-        # Create GL textures once
-        if has_opengl:
-            def make_gl_tex(surface):
-                if surface is None:
-                    return None
-                try:
-                    data = pygame.image.tostring(surface, "RGBA", True)
-                    tid = gl.glGenTextures(1)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, tid)
-                    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-                    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, surface.get_width(), surface.get_height(), 0,
-                                    gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-                    return tid
-                except Exception as e:
-                    print(f"Failed to create GL texture: {e}")
-                    return None
-
-            wall_tex_id = make_gl_tex(wall_texture)
-            weapon_tex_id = make_gl_tex(weapon_texture)
-            enemy_tex_id = make_gl_tex(enemy_texture)
-            player_tex_id = make_gl_tex(player_texture)
-
         # Set up the projection matrix
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(FOV, self.screen_width / self.screen_height, 0.1, 100.0)
+        gl.glMatrixMode(gl.GL_PROJECTION)
+        gl.glLoadIdentity()
+        glu.gluPerspective(FOV, self.screen_width / self.screen_height, 0.1, 100.0)
 
         # Set up the modelview matrix
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        gl.glMatrixMode(gl.GL_MODELVIEW)
+        gl.glLoadIdentity()
 
         # Enable depth testing
-        glEnable(GL_DEPTH_TEST)
+        gl.glEnable(gl.GL_DEPTH_TEST)
 
         # Set up lighting
-        glEnable(GL_LIGHTING)
-        glEnable(GL_LIGHT0)
-        glEnable(GL_COLOR_MATERIAL)
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        gl.glEnable(gl.GL_LIGHTING)
+        gl.glEnable(gl.GL_LIGHT0)
+        gl.glEnable(gl.GL_COLOR_MATERIAL)
+        gl.glColorMaterial(gl.GL_FRONT_AND_BACK, gl.GL_AMBIENT_AND_DIFFUSE)
 
         # Set light position and properties
-        glLightfv(GL_LIGHT0, GL_POSITION, (0, 10, 0, 1))
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, (1.0, 1.0, 1.0, 1.0))
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.3, 0.3, 0.3, 1.0))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_POSITION, (0, 10, 0, 1))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_DIFFUSE, (1.0, 1.0, 1.0, 1.0))
+        gl.glLightfv(gl.GL_LIGHT0, gl.GL_AMBIENT, (0.3, 0.3, 0.3, 1.0))
 
     def generate_level(self):
         """Generate walls for the level"""
@@ -880,12 +863,12 @@ class Shooter3D:
     def render_scene(self):
         # Clear the screen and depth buffer
         if has_opengl:
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            glClearColor(0.5, 0.5, 1.0, 1.0)  # Sky blue color
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+            gl.glClearColor(0.5, 0.5, 1.0, 1.0)  # Sky blue color
 
             # Set camera position and orientation
-            glLoadIdentity()
-            gluLookAt(
+            gl.glLoadIdentity()
+            glu.gluLookAt(
                 self.camera.position.x, self.camera.position.y, self.camera.position.z,  # Camera position
                 self.camera.position.x + self.camera.forward.x,  # Look at point
                 self.camera.position.y + self.camera.forward.y,
@@ -894,22 +877,22 @@ class Shooter3D:
             )
 
             # Draw floor
-            glBegin(GL_QUADS)
-            glColor3f(0.3, 0.3, 0.3)  # Dark gray
-            glVertex3f(-WORLD_SIZE/2, FLOOR_Y, -WORLD_SIZE/2)
-            glVertex3f(WORLD_SIZE/2, FLOOR_Y, -WORLD_SIZE/2)
-            glVertex3f(WORLD_SIZE/2, FLOOR_Y, WORLD_SIZE/2)
-            glVertex3f(-WORLD_SIZE/2, FLOOR_Y, WORLD_SIZE/2)
-            glEnd()
+            gl.glBegin(gl.GL_QUADS)
+            gl.glColor3f(0.3, 0.3, 0.3)  # Dark gray
+            gl.glVertex3f(-WORLD_SIZE/2, FLOOR_Y, -WORLD_SIZE/2)
+            gl.glVertex3f(WORLD_SIZE/2, FLOOR_Y, -WORLD_SIZE/2)
+            gl.glVertex3f(WORLD_SIZE/2, FLOOR_Y, WORLD_SIZE/2)
+            gl.glVertex3f(-WORLD_SIZE/2, FLOOR_Y, WORLD_SIZE/2)
+            gl.glEnd()
 
             # Draw ceiling
-            glBegin(GL_QUADS)
-            glColor3f(0.5, 0.5, 0.5)  # Light gray
-            glVertex3f(-WORLD_SIZE/2, CEILING_Y, -WORLD_SIZE/2)
-            glVertex3f(WORLD_SIZE/2, CEILING_Y, -WORLD_SIZE/2)
-            glVertex3f(WORLD_SIZE/2, CEILING_Y, WORLD_SIZE/2)
-            glVertex3f(-WORLD_SIZE/2, CEILING_Y, WORLD_SIZE/2)
-            glEnd()
+            gl.glBegin(gl.GL_QUADS)
+            gl.glColor3f(0.5, 0.5, 0.5)  # Light gray
+            gl.glVertex3f(-WORLD_SIZE/2, CEILING_Y, -WORLD_SIZE/2)
+            gl.glVertex3f(WORLD_SIZE/2, CEILING_Y, -WORLD_SIZE/2)
+            gl.glVertex3f(WORLD_SIZE/2, CEILING_Y, WORLD_SIZE/2)
+            gl.glVertex3f(-WORLD_SIZE/2, CEILING_Y, WORLD_SIZE/2)
+            gl.glEnd()
 
             # Draw walls
             for wall in self.walls:
